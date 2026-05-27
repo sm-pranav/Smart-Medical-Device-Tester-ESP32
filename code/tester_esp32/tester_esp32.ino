@@ -98,3 +98,103 @@ WebServer server(80);
 //  We build one normalized ECG beat (P-QRS-T) as a lookup table where the R-peak
 //  = 1.0 and the baseline = 0.0 (small negatives for Q and S). We replay it at
 //  the commanded heart rate on the DAC. Amplitude is set by scaling the table.
+// ============================================================================
+const int   SAMPLE_HZ  = 250;                    // DAC update rate
+const long  SAMPLE_US  = 1000000L / SAMPLE_HZ;   // 4000 us per sample
+const int   TABLE_N    = 200;                    // points in the P-QRS-T complex
+float ecgTable[TABLE_N];                         // normalized 0..1 (R = 1.0)
+
+// ---- beat timing -----------------------------------------------------------
+// IMPORTANT: the table holds only the P-QRS-T *complex*, NOT the whole beat.
+// In a real heart the complex keeps roughly the same duration (~400 ms) no matter
+// the rate; what shrinks as the rate rises is the flat resting gap between beats.
+// We copy that behaviour. If we instead stretched the complex across the whole
+// beat, the R spike would get narrower and narrower at high rates - at 240 BPM it
+// would be about 2.5 ms wide, which is thinner than one 4 ms sample AND far above
+// the AD8232's ~40 Hz passband, so the DUT would simply miss the beats.
+// Keeping the complex a fixed length keeps the R spike ~19 ms wide even at 240 BPM.
+const float COMPLEX_MS_MAX   = 400.0f;                                  // ~400 ms complex
+const float COMPLEX_SAMP_MAX = COMPLEX_MS_MAX * SAMPLE_HZ / 1000.0f;    // = 100 samples
+const float COMPLEX_MAX_FRAC = 0.85f;   // at high rates, compress to fit the beat
+
+// ---- attenuator / amplitude math --------------------------------------------
+// Divider: DAC -> R_TOP in series -> node -> R_BOT to GND. The AD8232 sees the
+// node voltage. Ratio = R_BOT / (R_TOP + R_BOT). With 100k + 100 ohm ~= 1/1000,
+// so 1 V at the DAC becomes ~1 mV at the AD8232 input. We AC-couple with 1 uF so
+// only the AC ECG passes; the DAC's DC baseline is blocked.
+const float R_TOP = 100000.0f;   // 100 kohm series
+const float R_BOT = 100.0f;      // 100 ohm to ground
+const float DIV_RATIO = R_BOT / (R_TOP + R_BOT);   // ~0.000999
+const int   DAC_BASE  = 90;      // DAC baseline count (~1.16 V); AC-coupled away
+const float DAC_VREF  = 3.3f;
+
+// Convert a target R-wave amplitude (mV at the AD8232 input) to DAC counts of
+// deviation from the baseline.
+float ampToCounts(float mV) {
+  float vdac   = (mV / 1000.0f) / DIV_RATIO;   // volts needed at the DAC
+  float counts = vdac / DAC_VREF * 255.0f;     // 8-bit DAC
+  return counts;
+}
+
+// live generation state
+volatile float genBPM = 60.0f;   // commanded heart rate
+volatile float genAMP = 1.0f;    // commanded R amplitude (mV)
+bool  noiseOn   = false;         // inject mains hum + baseline wander (step 9)
+bool  outputOff = true;          // true = hold flat baseline (idle / leads-off)
+float phaseSamp = 0.0f;          // position within the current beat (samples)
+unsigned long lastSampleUs = 0;
+unsigned long genStartMs   = 0;  // for the 50 Hz / wander phase
+
+// ============================================================================
+//  TEST PLAN
+// ============================================================================
+enum CheckType { CHK_BPM, CHK_AMP, CHK_NOISE, CHK_LEADSOFF };
+struct PlanStep { float bpm; float amp; CheckType chk; };
+
+PlanStep plan[] = {
+  { 30.0f, 1.0f, CHK_BPM },       // 1
+  { 60.0f, 1.0f, CHK_BPM },       // 2
+  {120.0f, 1.0f, CHK_BPM },       // 3
+  {180.0f, 1.0f, CHK_BPM },       // 4
+  {240.0f, 1.0f, CHK_BPM },       // 5
+  { 60.0f, 0.5f, CHK_AMP },       // 6
+  { 60.0f, 1.0f, CHK_AMP },       // 7
+  { 60.0f, 2.0f, CHK_AMP },       // 8
+  { 60.0f, 1.0f, CHK_NOISE },     // 9  (mains hum + baseline wander)
+  { 60.0f, 0.0f, CHK_LEADSOFF }   // 10 (open input / leads-off)
+};
+const int NUM_STEPS = sizeof(plan) / sizeof(plan[0]);
+
+// per-step results
+struct StepResult { float gb, ga, mb, ma; int verdict; };  // verdict: -1 na,0 fail,1 pass
+StepResult results[16];
+
+// ============================================================================
+//  CALIBRATION SWEEP  (BPM points at 1.0 mV)
+// ============================================================================
+const float calRefPts[] = { 30, 65, 100, 135, 170, 205, 240 };
+const int   NUM_CAL = sizeof(calRefPts) / sizeof(calRefPts[0]);
+float calMeas[NUM_CAL];
+int   calVerdict[NUM_CAL];
+float calGain = 1.0f, calOffset = 0.0f, calMaxErr = 0.0f;
+
+// ============================================================================
+//  STATE MACHINE
+// ============================================================================
+enum { S_IDLE = 0, S_TEST = 10, S_CAL = 20, S_DONE = 30, S_FAULT = 90 };
+int  State = S_IDLE;
+bool modeCal = false;         // false = TEST mode, true = CALIBRATE mode
+int  stepIdx = 0;
+unsigned long stepStartMs = 0;
+int  passCount = 0, failCount = 0;
+int  overall = -1;            // -1 na, 0 fail, 1 pass
+
+const unsigned long STEP_MS      = 7000;   // time per test step
+const unsigned long CAL_STEP_MS  = 7000;   // time per calibration point
+const unsigned long DUT_TIMEOUT  = 4000;   // no report for this long -> FAULT
+
+// ============================================================================
+//  DUT REPORT (parsed from UART2)
+// ============================================================================
+int   measBPM  = 0;
+float measAMP  = 0.0f;
