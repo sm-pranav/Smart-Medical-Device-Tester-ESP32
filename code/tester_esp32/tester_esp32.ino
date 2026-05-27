@@ -198,3 +198,123 @@ const unsigned long DUT_TIMEOUT  = 4000;   // no report for this long -> FAULT
 // ============================================================================
 int   measBPM  = 0;
 float measAMP  = 0.0f;
+int   leadsOff = 0;
+unsigned long lastReportMs = 0;
+char  rxBuf[64];
+int   rxLen = 0;
+
+// ============================================================================
+//  BUTTONS (debounced)
+// ============================================================================
+bool lastRun = HIGH, lastMode = HIGH;
+unsigned long lastRunMs = 0, lastModeMs = 0;
+const unsigned long DEBOUNCE_MS = 40;
+
+// ============================================================================
+//  MISC
+// ============================================================================
+unsigned long bootMs = 0;
+unsigned long lastOledMs = 0;
+
+// forward declarations
+void buildEcgTable();
+void generateTick();
+void loadStepSetpoint(int i);
+#if TEST_MODE
+void runBenchTests();
+#endif
+void readDUT();
+void parseReport(const char* s);
+void handleButtons();
+void startRun();
+void stopRun();
+void runTestSequencer();
+void runCalSequencer();
+void evaluateTestStep(int i);
+void finishTest();
+void finishCal();
+void computeCalFit();
+void updateLeds();
+void updateOled();
+void beep(int freq, int ms);
+String buildJson();
+void handleRoot();
+void handleData();
+void handleStart();
+void handleStop();
+void handleMode();
+
+// =============================================================================
+//  SETUP
+// =============================================================================
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(115200, SERIAL_8N1, PIN_RX2, PIN_TX2);
+
+  pinMode(PIN_BTN_RUN,  INPUT_PULLUP);
+  pinMode(PIN_BTN_MODE, INPUT_PULLUP);
+  pinMode(PIN_LED_PASS, OUTPUT);
+  pinMode(PIN_LED_FAIL, OUTPUT);
+  pinMode(PIN_BUZZER,   OUTPUT);
+  digitalWrite(PIN_LED_PASS, LOW);
+  digitalWrite(PIN_LED_FAIL, LOW);
+  digitalWrite(PIN_BUZZER,   LOW);
+
+  dacWrite(PIN_DAC, DAC_BASE);          // hold flat baseline at start
+
+  buildEcgTable();
+
+  // ---- OLED ----
+  Wire.begin(PIN_SDA, PIN_SCL);
+  oledOk = oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  if (oledOk) {
+    oled.clearDisplay();
+    oled.setTextColor(SSD1306_WHITE);
+    oled.setTextSize(1);
+    oled.setCursor(0, 0);
+    oled.println(F("Med Device Tester"));
+    oled.println(F("booting..."));
+    oled.display();
+  } else {
+    Serial.println(F("[OLED] not found at 0x3C (continuing without display)"));
+  }
+
+#if TEST_MODE
+  runBenchTests();     // never returns to normal loop in test mode
+#endif
+
+  // ---- Wi-Fi SoftAP + web routes ----
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS);
+  IPAddress ip = WiFi.softAPIP();
+  Serial.print(F("[WiFi] SoftAP '")); Serial.print(AP_SSID);
+  Serial.print(F("' at http://")); Serial.println(ip);
+
+  server.on("/",        handleRoot);
+  server.on("/data",    handleData);
+  server.on("/start",   handleStart);
+  server.on("/stop",    handleStop);
+  server.on("/mode",    handleMode);
+  server.begin();
+  Serial.println(F("[WEB ] server on port 80"));
+
+  bootMs = millis();
+  lastSampleUs = micros();
+  for (int i = 0; i < NUM_STEPS; i++) results[i].verdict = -1;
+
+  Serial.println(F("[BOOT] ready. IDLE. press Start to run."));
+}
+
+// =============================================================================
+//  MAIN LOOP  (cooperative scheduler)
+// =============================================================================
+void loop() {
+  // 1) keep the DAC waveform going at a steady 250 Hz
+  unsigned long nowUs = micros();
+  if ((long)(nowUs - lastSampleUs) >= SAMPLE_US) {
+    lastSampleUs += SAMPLE_US;
+    generateTick();
+  }
+
+  // 2) service everything else
+  server.handleClient();
