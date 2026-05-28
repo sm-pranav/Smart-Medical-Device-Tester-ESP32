@@ -318,3 +318,113 @@ void loop() {
 
   // 2) service everything else
   server.handleClient();
+  readDUT();
+  handleButtons();
+
+  // 3) sequencers
+  if (State == S_TEST) runTestSequencer();
+  else if (State == S_CAL) runCalSequencer();
+
+  // 4) FAULT watch: during a run, the DUT must keep reporting
+  if ((State == S_TEST || State == S_CAL) &&
+      (millis() - lastReportMs > DUT_TIMEOUT)) {
+    State = S_FAULT;
+    outputOff = true;
+    Serial.println(F("[FAULT] no DUT report (check UART cross-wiring & GND)"));
+    beep(400, 300);
+  }
+
+  // 5) OLED + LEDs at a calm rate (keeps the waveform smooth)
+  if (millis() - lastOledMs > 400) {
+    lastOledMs = millis();
+    updateOled();
+    updateLeds();
+  }
+}
+
+// =============================================================================
+//  buildEcgTable()  - make one normalized P-QRS-T beat from Gaussian bumps
+// =============================================================================
+float gaussBump(float t, float mu, float sigma) {
+  float x = (t - mu) / sigma;
+  return expf(-0.5f * x * x);
+}
+void buildEcgTable() {
+  // Amplitudes are fractions of the R-wave (R = 1.0).
+  // t runs 0..1 across the ~400 ms COMPLEX (not the whole beat), so the times
+  // below are real durations: P at ~48 ms, R at ~188 ms, T at ~312 ms, which
+  // gives a PR interval near 140 ms and a QRS around 80 ms - realistic enough
+  // that a rate/amplitude detector treats it exactly like a real beat.
+  const float P =  0.12f, Q = -0.10f, R = 1.00f, S = -0.16f, T = 0.30f;
+  for (int i = 0; i < TABLE_N; i++) {
+    float t = (float)i / TABLE_N;              // 0..1 across the complex
+    float v = P * gaussBump(t, 0.12f, 0.045f)  // P wave  (broad, low)
+            + Q * gaussBump(t, 0.40f, 0.018f)  // Q dip
+            + R * gaussBump(t, 0.47f, 0.022f)  // R spike (the tall one)
+            + S * gaussBump(t, 0.55f, 0.020f)  // S dip
+            + T * gaussBump(t, 0.78f, 0.060f); // T wave  (broad, medium)
+    ecgTable[i] = v;
+  }
+}
+
+// =============================================================================
+//  generateTick()  - output one DAC sample of the synthetic ECG
+// =============================================================================
+void generateTick() {
+  if (outputOff || State == S_IDLE || State == S_DONE || State == S_FAULT) {
+    dacWrite(PIN_DAC, DAC_BASE);      // flat line
+    return;
+  }
+
+  // how long one whole beat lasts, in samples
+  float samplesPerBeat = (SAMPLE_HZ * 60.0f) / genBPM;
+
+  // The complex keeps its fixed ~400 ms length; only at high rates (above about
+  // 128 BPM) is it compressed so it still fits inside one beat.
+  float complexSamples = COMPLEX_MAX_FRAC * samplesPerBeat;
+  if (complexSamples > COMPLEX_SAMP_MAX) complexSamples = COMPLEX_SAMP_MAX;
+
+  // advance the beat phase and wrap (while, so a big BPM jump settles at once)
+  phaseSamp += 1.0f;
+  while (phaseSamp >= samplesPerBeat) phaseSamp -= samplesPerBeat;
+
+  // inside the complex -> play the table; after it -> flat resting baseline
+  float level = 0.0f;
+  if (phaseSamp < complexSamples) {
+    int idx = (int)((phaseSamp / complexSamples) * TABLE_N);
+    if (idx < 0) idx = 0;
+    if (idx >= TABLE_N) idx = TABLE_N - 1;
+    level = ecgTable[idx];
+  }
+
+  float ampCounts = ampToCounts(genAMP);      // R-wave height in DAC counts
+  float val = DAC_BASE + level * ampCounts;
+
+  // optional noise injection for the robustness step
+  if (noiseOn) {
+    float tsec = (millis() - genStartMs) / 1000.0f;
+    val += 12.0f * sinf(2.0f * PI * 50.0f * tsec);   // 50 Hz mains hum
+    val += 18.0f * sinf(2.0f * PI * 0.3f  * tsec);   // slow baseline wander
+  }
+
+  if (val < 0)   val = 0;
+  if (val > 255) val = 255;
+  dacWrite(PIN_DAC, (int)val);
+}
+
+// =============================================================================
+//  readDUT()  - collect UART lines and parse "BPM=.. AMP=.. LO=.."
+// =============================================================================
+void readDUT() {
+  while (Serial2.available()) {
+    char c = Serial2.read();
+    if (c == '\n' || c == '\r') {
+      if (rxLen > 0) { rxBuf[rxLen] = 0; parseReport(rxBuf); rxLen = 0; }
+    } else if (rxLen < (int)sizeof(rxBuf) - 1) {
+      rxBuf[rxLen++] = c;
+    }
+  }
+}
+void parseReport(const char* s) {
+  int b = 0, l = 0; float a = 0.0f;
+  if (sscanf(s, "BPM=%d AMP=%f LO=%d", &b, &a, &l) == 3) {
