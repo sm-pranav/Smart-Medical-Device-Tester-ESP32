@@ -428,3 +428,113 @@ void readDUT() {
 void parseReport(const char* s) {
   int b = 0, l = 0; float a = 0.0f;
   if (sscanf(s, "BPM=%d AMP=%f LO=%d", &b, &a, &l) == 3) {
+    measBPM = b; measAMP = a; leadsOff = l;
+    lastReportMs = millis();
+  }
+}
+
+// =============================================================================
+//  handleButtons()  - debounced Start/Stop and Mode
+// =============================================================================
+void handleButtons() {
+  bool run  = digitalRead(PIN_BTN_RUN);
+  bool mode = digitalRead(PIN_BTN_MODE);
+  unsigned long now = millis();
+
+  // Start/Stop (active LOW)
+  if (run != lastRun && now - lastRunMs > DEBOUNCE_MS) {
+    lastRunMs = now;
+    if (run == LOW) {   // pressed
+      if (State == S_IDLE || State == S_DONE || State == S_FAULT) startRun();
+      else stopRun();
+    }
+  }
+  lastRun = run;
+
+  // Mode toggle (only when not running)
+  if (mode != lastMode && now - lastModeMs > DEBOUNCE_MS) {
+    lastModeMs = now;
+    if (mode == LOW) {
+      if (State == S_IDLE || State == S_DONE || State == S_FAULT) {
+        modeCal = !modeCal;
+        Serial.print(F("[MODE] ")); Serial.println(modeCal ? "CALIBRATE" : "TEST");
+      }
+    }
+  }
+  lastMode = mode;
+}
+
+// =============================================================================
+//  startRun() / stopRun()
+// =============================================================================
+void startRun() {
+  passCount = 0; failCount = 0; overall = -1;
+  stepIdx = 0; stepStartMs = millis();
+  lastReportMs = millis();     // give the DUT a fresh timeout window
+  noiseOn = false; outputOff = false;
+  genStartMs = millis();
+  for (int i = 0; i < NUM_STEPS; i++) results[i].verdict = -1;
+  for (int i = 0; i < NUM_CAL; i++) { calMeas[i] = 0; calVerdict[i] = -1; }
+  calGain = 1.0f; calOffset = 0.0f; calMaxErr = 0.0f;
+
+  if (modeCal) { State = S_CAL;  Serial.println(F("[RUN] calibration sweep")); }
+  else         { State = S_TEST; Serial.println(F("[RUN] automated test plan")); }
+
+  // load first setpoint
+  if (modeCal) { genBPM = calRefPts[0]; genAMP = 1.0f; phaseSamp = 0.0f; }
+  else         { loadStepSetpoint(0); }
+}
+
+void stopRun() {
+  State = S_IDLE;
+  outputOff = true; noiseOn = false;
+  Serial.println(F("[RUN] stopped -> IDLE"));
+}
+
+// =============================================================================
+//  loadStepSetpoint()  - apply the generator settings for a test step
+// =============================================================================
+void loadStepSetpoint(int i) {
+  genBPM = plan[i].bpm;
+  genAMP = plan[i].amp;
+  noiseOn = (plan[i].chk == CHK_NOISE);
+  outputOff = (plan[i].chk == CHK_LEADSOFF);  // open input for leads-off step
+  genStartMs = millis();
+  phaseSamp  = 0.0f;    // start each step on a clean beat boundary
+}
+
+// =============================================================================
+//  runTestSequencer()
+// =============================================================================
+void runTestSequencer() {
+  if (millis() - stepStartMs >= STEP_MS) {
+    evaluateTestStep(stepIdx);
+    stepIdx++;
+    if (stepIdx >= NUM_STEPS) { finishTest(); return; }
+    stepStartMs = millis();
+    loadStepSetpoint(stepIdx);
+  }
+}
+
+void evaluateTestStep(int i) {
+  StepResult r;
+  r.gb = plan[i].bpm; r.ga = plan[i].amp;
+  r.mb = measBPM;     r.ma = measAMP;
+  bool pass = false;
+
+  switch (plan[i].chk) {
+    case CHK_BPM:
+    case CHK_NOISE: {
+      float tol = plan[i].bpm * 0.05f;      // 5%
+      if (tol < 5.0f) tol = 5.0f;           // or +/-5 BPM, whichever is larger
+      pass = fabs((float)measBPM - plan[i].bpm) <= tol;
+      break;
+    }
+    case CHK_AMP: {
+      // +/-10%, but never tighter than +/-0.10 mV. The floor matters at the
+      // 0.5 mV step: a bare 10% band there is only +/-0.05 mV, which is finer
+      // than this signal chain (8-bit DAC, breadboard resistors) can resolve,
+      // so it would fail a DUT that is actually fine.
+      float tol = plan[i].amp * 0.10f;
+      if (tol < 0.10f) tol = 0.10f;
+      pass = fabs(measAMP - plan[i].amp) <= tol;
