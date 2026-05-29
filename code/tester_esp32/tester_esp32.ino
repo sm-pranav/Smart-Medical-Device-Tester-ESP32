@@ -538,3 +538,113 @@ void evaluateTestStep(int i) {
       float tol = plan[i].amp * 0.10f;
       if (tol < 0.10f) tol = 0.10f;
       pass = fabs(measAMP - plan[i].amp) <= tol;
+      break;
+    }
+    case CHK_LEADSOFF: {
+      // open input: pass if the DUT flags leads-off OR reports no rate
+      pass = (leadsOff == 1) || (measBPM < 20);
+      break;
+    }
+  }
+
+  r.verdict = pass ? 1 : 0;
+  results[i] = r;
+  if (pass) passCount++; else failCount++;
+
+  Serial.printf("[STEP %d] gen %.0f/%.1fmV  meas %d/%.2fmV  -> %s\n",
+                i + 1, r.gb, r.ga, (int)r.mb, r.ma, pass ? "PASS" : "FAIL");
+}
+
+void finishTest() {
+  overall = (failCount == 0) ? 1 : 0;
+  State = S_DONE;
+  outputOff = true; noiseOn = false;
+  beep(overall ? 1500 : 400, overall ? 150 : 400);
+  Serial.printf("[DONE] TEST complete. pass=%d fail=%d overall=%s\n",
+                passCount, failCount, overall ? "PASS" : "FAIL");
+}
+
+// =============================================================================
+//  runCalSequencer()
+// =============================================================================
+void runCalSequencer() {
+  if (millis() - stepStartMs >= CAL_STEP_MS) {
+    calMeas[stepIdx] = measBPM;         // record measured BPM at this ref
+    // per-point pass/fail vs BPM tolerance
+    float tol = calRefPts[stepIdx] * 0.05f; if (tol < 5.0f) tol = 5.0f;
+    bool pass = fabs((float)measBPM - calRefPts[stepIdx]) <= tol;
+    calVerdict[stepIdx] = pass ? 1 : 0;
+    if (pass) passCount++; else failCount++;
+    Serial.printf("[CAL %d] ref %.0f  meas %d  -> %s\n",
+                  stepIdx + 1, calRefPts[stepIdx], measBPM, pass ? "PASS" : "FAIL");
+
+    stepIdx++;
+    if (stepIdx >= NUM_CAL) { finishCal(); return; }
+    stepStartMs = millis();
+    genBPM = calRefPts[stepIdx];
+    genAMP = 1.0f;
+    phaseSamp = 0.0f;      // clean beat boundary for the new reference point
+  }
+}
+
+void finishCal() {
+  computeCalFit();
+  overall = (failCount == 0) ? 1 : 0;
+  State = S_DONE;
+  outputOff = true;
+  beep(1500, 150);
+  Serial.printf("[DONE] CAL complete. gain=%.3f offset=%.2f maxErr=%.2f\n",
+                calGain, calOffset, calMaxErr);
+}
+
+// least-squares straight-line fit: measured = gain * reference + offset
+void computeCalFit() {
+  float sx = 0, sy = 0, sxx = 0, sxy = 0;
+  int n = NUM_CAL;
+  for (int i = 0; i < n; i++) {
+    float x = calRefPts[i], y = calMeas[i];
+    sx += x; sy += y; sxx += x * x; sxy += x * y;
+  }
+  float denom = (n * sxx - sx * sx);
+  if (fabs(denom) < 1e-6) { calGain = 1.0f; calOffset = 0.0f; }
+  else {
+    calGain   = (n * sxy - sx * sy) / denom;
+    calOffset = (sy - calGain * sx) / n;
+  }
+  // max absolute error between measured and reference
+  calMaxErr = 0.0f;
+  for (int i = 0; i < n; i++) {
+    float e = fabs(calMeas[i] - calRefPts[i]);
+    if (e > calMaxErr) calMaxErr = e;
+  }
+}
+
+// =============================================================================
+//  LEDs
+// =============================================================================
+void updateLeds() {
+  bool green = false, red = false;
+  if (State == S_FAULT) { red = true; }
+  else if (State == S_DONE) { green = (overall == 1); red = (overall == 0); }
+  else if (State == S_TEST || State == S_CAL) {
+    // show the most recent step verdict live
+    int last = stepIdx - 1;
+    if (State == S_TEST && last >= 0 && results[last].verdict >= 0) {
+      green = (results[last].verdict == 1);
+      red   = (results[last].verdict == 0);
+    } else if (State == S_CAL && last >= 0 && calVerdict[last] >= 0) {
+      green = (calVerdict[last] == 1);
+      red   = (calVerdict[last] == 0);
+    }
+  }
+  digitalWrite(PIN_LED_PASS, green ? HIGH : LOW);
+  digitalWrite(PIN_LED_FAIL, red   ? HIGH : LOW);
+}
+
+// =============================================================================
+//  OLED status screen
+// =============================================================================
+const char* stateName() {
+  switch (State) {
+    case S_IDLE:  return "IDLE";
+    case S_TEST:  return "TESTING";
