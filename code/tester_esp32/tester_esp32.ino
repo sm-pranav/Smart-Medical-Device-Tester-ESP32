@@ -648,3 +648,113 @@ const char* stateName() {
   switch (State) {
     case S_IDLE:  return "IDLE";
     case S_TEST:  return "TESTING";
+    case S_CAL:   return "CALIBRATE";
+    case S_DONE:  return "COMPLETE";
+    case S_FAULT: return "FAULT";
+  }
+  return "?";
+}
+
+void updateOled() {
+  if (!oledOk) return;
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setCursor(0, 0);
+
+  // line 1: mode + state
+  oled.print(modeCal ? "CAL " : "TEST ");
+  oled.print("| ");
+  oled.println(stateName());
+  oled.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+
+  if (State == S_IDLE) {
+    oled.setCursor(0, 16);
+    oled.println("Press START to run");
+    oled.print("Mode: ");
+    oled.println(modeCal ? "CALIBRATE" : "TEST PLAN");
+    oled.setCursor(0, 44);
+    oled.println("Wi-Fi: MedTester");
+    oled.println("http://192.168.4.1");
+  }
+  else if (State == S_TEST) {
+    oled.setCursor(0, 14);
+    oled.printf("Step %d/%d\n", stepIdx + 1, NUM_STEPS);
+    oled.printf("Gen : %3.0f BPM %.1fmV\n", genBPM, genAMP);
+    oled.printf("Meas: %3d BPM %.2fmV\n", measBPM, measAMP);
+    int last = stepIdx - 1;
+    oled.setCursor(0, 44);
+    if (last >= 0 && results[last].verdict >= 0)
+      oled.printf("Last: %s\n", results[last].verdict ? "PASS" : "FAIL");
+    oled.printf("P:%d  F:%d  LO:%d", passCount, failCount, leadsOff);
+  }
+  else if (State == S_CAL) {
+    oled.setCursor(0, 14);
+    oled.printf("Point %d/%d\n", stepIdx + 1, NUM_CAL);
+    oled.printf("Ref : %3.0f BPM\n", genBPM);
+    oled.printf("Meas: %3d BPM\n", measBPM);
+    oled.setCursor(0, 44);
+    oled.printf("P:%d  F:%d", passCount, failCount);
+  }
+  else if (State == S_DONE) {
+    oled.setTextSize(2);
+    oled.setCursor(0, 16);
+    if (modeCal) {
+      oled.setTextSize(1);
+      oled.setCursor(0, 14);
+      oled.println("CALIBRATION DONE");
+      oled.printf("gain  : %.3f\n", calGain);
+      oled.printf("offset: %.2f\n", calOffset);
+      oled.printf("maxErr: %.2f BPM", calMaxErr);
+    } else {
+      oled.print(overall == 1 ? "PASS" : "FAIL");
+      oled.setTextSize(1);
+      oled.setCursor(0, 44);
+      oled.printf("Passed %d / %d steps", passCount, passCount + failCount);
+    }
+  }
+  else if (State == S_FAULT) {
+    oled.setTextSize(2);
+    oled.setCursor(0, 16);
+    oled.println("FAULT");
+    oled.setTextSize(1);
+    oled.setCursor(0, 40);
+    oled.println("No DUT report.");
+    oled.println("Check UART + GND.");
+  }
+  oled.display();
+}
+
+// =============================================================================
+//  buzzer  (bit-banged square wave; passive buzzer). Blocking, used only rarely.
+// =============================================================================
+void beep(int freq, int ms) {
+  if (freq <= 0) return;
+  long halfUs = 500000L / freq;
+  long cycles = (long)ms * 1000L / (2 * halfUs);
+  for (long i = 0; i < cycles; i++) {
+    digitalWrite(PIN_BUZZER, HIGH); delayMicroseconds(halfUs);
+    digitalWrite(PIN_BUZZER, LOW);  delayMicroseconds(halfUs);
+  }
+}
+
+// =============================================================================
+//  JSON  /data   (keys must match dashboard.html and report_logger.py)
+// =============================================================================
+String buildJson() {
+  String j = "{";
+  j += "\"state\":\"" + String(stateName()) + "\",";
+  j += "\"state_code\":" + String(State) + ",";
+  j += "\"mode\":\"" + String(modeCal ? "CAL" : "TEST") + "\",";
+  j += "\"step\":" + String(stepIdx + 1) + ",";
+  j += "\"total_steps\":" + String(modeCal ? NUM_CAL : NUM_STEPS) + ",";
+  j += "\"gen_bpm\":" + String(genBPM, 0) + ",";
+  j += "\"gen_amp\":" + String(genAMP, 2) + ",";
+  j += "\"meas_bpm\":" + String(measBPM) + ",";
+  j += "\"meas_amp\":" + String(measAMP, 2) + ",";
+
+  const char* v = "--";
+  if (State == S_TEST) {
+    int last = stepIdx - 1;
+    if (last >= 0 && results[last].verdict >= 0) v = results[last].verdict ? "PASS" : "FAIL";
+  }
+  j += "\"verdict\":\"" + String(v) + "\",";
