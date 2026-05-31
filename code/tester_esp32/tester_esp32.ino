@@ -758,3 +758,73 @@ String buildJson() {
     if (last >= 0 && results[last].verdict >= 0) v = results[last].verdict ? "PASS" : "FAIL";
   }
   j += "\"verdict\":\"" + String(v) + "\",";
+  j += "\"pass_count\":" + String(passCount) + ",";
+  j += "\"fail_count\":" + String(failCount) + ",";
+
+  const char* ov = "--";
+  if (State == S_DONE) ov = (overall == 1) ? "PASS" : "FAIL";
+  else if (State == S_TEST || State == S_CAL) ov = "RUNNING";
+  else if (State == S_FAULT) ov = "FAULT";
+  j += "\"overall\":\"" + String(ov) + "\",";
+
+  j += "\"leads_off\":" + String(leadsOff) + ",";
+  j += "\"cal_gain\":" + String(calGain, 3) + ",";
+  j += "\"cal_offset\":" + String(calOffset, 2) + ",";
+  j += "\"cal_max_err\":" + String(calMaxErr, 2) + ",";
+  j += "\"uptime_s\":" + String((millis() - bootMs) / 1000) + ",";
+
+  // test-step table
+  j += "\"steps\":[";
+  for (int i = 0; i < NUM_STEPS; i++) {
+    if (i) j += ",";
+    const char* sv = (results[i].verdict < 0) ? "--" : (results[i].verdict ? "PASS" : "FAIL");
+    j += "{\"n\":" + String(i + 1) +
+         ",\"gb\":" + String(plan[i].bpm, 0) +
+         ",\"ga\":" + String(plan[i].amp, 1) +
+         ",\"mb\":" + String(results[i].verdict < 0 ? 0 : (int)results[i].mb) +
+         ",\"ma\":" + String(results[i].verdict < 0 ? 0.0f : results[i].ma, 2) +
+         ",\"v\":\"" + String(sv) + "\"}";
+  }
+  j += "],";
+
+  // calibration points
+  j += "\"cal\":[";
+  for (int i = 0; i < NUM_CAL; i++) {
+    if (i) j += ",";
+    j += "{\"ref\":" + String(calRefPts[i], 0) +
+         ",\"meas\":" + String(calMeas[i], 0) + "}";
+  }
+  j += "]}";
+  return j;
+}
+
+// =============================================================================
+//  WEB HANDLERS
+// =============================================================================
+void handleData()  { server.send(200, "application/json", buildJson()); }
+void handleStart() { if (State == S_IDLE || State == S_DONE || State == S_FAULT) startRun();
+                     server.send(200, "text/plain", "ok"); }
+void handleStop()  { stopRun(); server.send(200, "text/plain", "ok"); }
+void handleMode()  {
+  if (server.hasArg("m")) {
+    String m = server.arg("m");
+    if (State == S_IDLE || State == S_DONE || State == S_FAULT) {
+      modeCal = (m == "cal");
+    }
+  }
+  server.send(200, "text/plain", "ok");
+}
+
+// The dashboard page (same markup as code/dashboard.html) is embedded in the
+// firmware so the ESP32 serves it directly. It lives in the companion file
+// index_html.h rather than here, because the Arduino .ino preprocessor tries to
+// turn the page's JavaScript "function" lines into C++ prototypes and the build
+// then fails. See index_html.h. Keep it in sync with code/dashboard.html.
+
+void handleRoot() {
+  server.send_P(200, "text/html", PAGE_INDEX);
+}
+
+// =============================================================================
+//  BENCH TEST MODE  (only compiled/run when TEST_MODE = 1)
+// =============================================================================
