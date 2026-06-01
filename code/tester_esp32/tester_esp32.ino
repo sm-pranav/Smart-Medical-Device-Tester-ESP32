@@ -828,3 +828,56 @@ void handleRoot() {
 // =============================================================================
 //  BENCH TEST MODE  (only compiled/run when TEST_MODE = 1)
 // =============================================================================
+#if TEST_MODE
+void runBenchTests() {
+  Serial.println(F("\n==== TEST_MODE ===="));
+
+  // 1) I2C scan
+  Serial.println(F("[1] I2C scan..."));
+  for (byte a = 1; a < 127; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) { Serial.print(F("  found 0x")); Serial.println(a, HEX); }
+  }
+
+  // 2) DAC ramp on GPIO25, ramped up then back down.
+  //    If you added the OPTIONAL self-monitor jumper (GPIO25 -> GPIO34) this also
+  //    prints what the ESP32 measures on its own output, so you can confirm the
+  //    DAC works without owning a multimeter. Expect "meas" to climb with "cmd"
+  //    (roughly cmd/255 * 4095). If you did NOT fit that jumper, ignore "meas".
+  Serial.println(F("[2] DAC ramp on GPIO25 (up then down, ~5 s)"));
+  for (int v = 0; v <= 255; v += 15) {
+    dacWrite(PIN_DAC, v);
+    delay(60);
+    Serial.printf("    cmd=%3d  meas(GPIO34)=%4d\n", v, analogRead(PIN_SELFMON));
+  }
+  for (int v = 255; v >= 0; v -= 15) { dacWrite(PIN_DAC, v); delay(60); }
+  dacWrite(PIN_DAC, DAC_BASE);
+
+  // 3) button read
+  Serial.println(F("[3] press buttons for 5 s..."));
+  unsigned long t = millis();
+  while (millis() - t < 5000) {
+    Serial.printf("  RUN=%d MODE=%d\n",
+                  digitalRead(PIN_BTN_RUN), digitalRead(PIN_BTN_MODE));
+    delay(300);
+  }
+
+  // 4) UART echo: print anything the DUT sends
+  Serial.println(F("[4] echoing DUT UART for 8 s (expect BPM=.. lines)"));
+  t = millis();
+  while (millis() - t < 8000) {
+    while (Serial2.available()) Serial.write(Serial2.read());
+  }
+
+  // 5) LED + generated ECG demo
+  Serial.println(F("[5] blinking LEDs + generating 60 BPM ECG (Ctrl-reset to exit)"));
+  genBPM = 60; genAMP = 1.0; outputOff = false; State = S_TEST;
+  lastSampleUs = micros();
+  while (true) {
+    unsigned long nowUs = micros();
+    if ((long)(nowUs - lastSampleUs) >= SAMPLE_US) { lastSampleUs += SAMPLE_US; generateTick(); }
+    digitalWrite(PIN_LED_PASS, (millis() / 500) % 2);
+    digitalWrite(PIN_LED_FAIL, (millis() / 500 + 1) % 2);
+  }
+}
+#endif
