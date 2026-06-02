@@ -158,3 +158,165 @@ const char PAGE_INDEX[] PROGMEM = R"HTMLPAGE(
   </div>
 
   <div class="grid">
+    <section class="card">
+      <h2>Lead status</h2>
+      <div id="loBadge" class="badge lo-ok"><span class="bd"></span><span id="loText">Leads connected</span></div>
+    </section>
+    <section class="card">
+      <h2>Current step</h2>
+      <div class="read"><div><span class="big num" id="curStep">0</span> <span class="u">of <span id="curTot">0</span></span></div>
+      <div class="gen"><b id="curVerdict">--</b></div></div>
+    </section>
+  </div>
+
+  <!-- STEP TABLE -->
+  <section class="card">
+    <h2>Automated test plan</h2>
+    <table>
+      <thead><tr><th>#</th><th>Gen BPM</th><th>Gen mV</th><th>Meas BPM</th><th>Meas mV</th><th>Verdict</th></tr></thead>
+      <tbody id="stepBody"></tbody>
+    </table>
+  </section>
+
+  <!-- CALIBRATION -->
+  <section class="card">
+    <h2>Calibration curve (reference vs measured BPM)</h2>
+    <div class="calhead">
+      <div><span class="num" id="calGain">1.000</span><small>gain</small></div>
+      <div><span class="num" id="calOffset">0.00</span><small>offset (BPM)</small></div>
+      <div><span class="num" id="calErr">0.00</span><small>max error (BPM)</small></div>
+    </div>
+    <canvas id="calCanvas" width="1000" height="520"></canvas>
+  </section>
+</main>
+
+<div class="foot">
+  Student research prototype &mdash; proof-of-concept ECG tester with a self-built stand-in monitor.
+  <b>Not a medical device</b>, not a certified analyzer, not for clinical use. Low-voltage bench signal only.
+</div>
+
+<script>
+const API = (location.protocol === "file:") ? "http://192.168.4.1" : "";
+const $ = (id) => document.getElementById(id);
+
+function setConn(ok){
+  $("dot").classList.toggle("on", ok);
+  $("connText").textContent = ok ? "Connected to MedTester" : "Tester offline";
+}
+function fmtUp(s){ s=Math.floor(s); if(s<60)return s+"s"; const m=(s/60)|0,r=s%60;
+  if(m<60)return m+"m "+r+"s"; const h=(m/60)|0; return h+"h "+(m%60)+"m"; }
+
+async function poll(){
+  try{
+    const res = await fetch(API+"/data",{cache:"no-store"});
+    if(!res.ok) throw 0;
+    render(await res.json());
+    setConn(true);
+  }catch(e){ setConn(false); }
+}
+
+function render(d){
+  // overall verdict box
+  const vb = $("verdict"); const ov = d.overall || "--";
+  vb.textContent = ov;
+  vb.className = "verdict " + (ov==="PASS"?"v-pass":ov==="FAIL"||ov==="FAULT"?"v-fail":ov==="RUNNING"?"v-run":"v-na");
+
+  $("stState").textContent = d.state || "--";
+  $("stMode").textContent  = d.mode || "--";
+  $("stStep").textContent  = (d.step||0)+"/"+(d.total_steps||0);
+  $("stPF").textContent    = (d.pass_count||0)+" / "+(d.fail_count||0);
+  $("stUp").textContent    = fmtUp(d.uptime_s||0);
+
+  $("measBpm").textContent = d.meas_bpm||0;
+  $("genBpm").textContent  = Math.round(d.gen_bpm||0);
+  $("measAmp").textContent = (Number(d.meas_amp)||0).toFixed(2);
+  $("genAmp").textContent  = (Number(d.gen_amp)||0).toFixed(2);
+
+  const lo = $("loBadge");
+  if(Number(d.leads_off)===1){ lo.className="badge lo-off"; $("loText").textContent="Leads OFF detected"; }
+  else { lo.className="badge lo-ok"; $("loText").textContent="Leads connected"; }
+
+  $("curStep").textContent = d.step||0;
+  $("curTot").textContent  = d.total_steps||0;
+  $("curVerdict").textContent = d.verdict||"--";
+
+  // mode buttons active state
+  $("mTest").classList.toggle("active", d.mode==="TEST");
+  $("mCal").classList.toggle("active", d.mode==="CAL");
+
+  // step table
+  const tb = $("stepBody"); tb.innerHTML="";
+  (d.steps||[]).forEach(s=>{
+    const tr=document.createElement("tr");
+    if(s.n===d.step && (d.state==="TESTING")) tr.className="cur";
+    const vc = s.v==="PASS"?"v-pass":s.v==="FAIL"?"v-fail":"v-na";
+    tr.innerHTML = "<td>"+s.n+"</td><td>"+Math.round(s.gb)+"</td><td>"+Number(s.ga).toFixed(1)+
+      "</td><td>"+(s.v==="--"?"-":s.mb)+"</td><td>"+(s.v==="--"?"-":Number(s.ma).toFixed(2))+
+      "</td><td class='"+vc+"'>"+s.v+"</td>";
+    tb.appendChild(tr);
+  });
+
+  // calibration
+  $("calGain").textContent   = (Number(d.cal_gain)||0).toFixed(3);
+  $("calOffset").textContent = (Number(d.cal_offset)||0).toFixed(2);
+  $("calErr").textContent    = (Number(d.cal_max_err)||0).toFixed(2);
+  drawCal(d.cal||[], Number(d.cal_gain)||1, Number(d.cal_offset)||0);
+}
+
+function drawCal(pts, gain, offset){
+  const cv=$("calCanvas"), ctx=cv.getContext("2d");
+  const W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H);
+  const pad=54, x0=pad, y0=H-pad, x1=W-20, y1=20;
+  const lo=0, hi=260;                   // BPM axis range for both axes
+  const sx=(v)=>x0+(v-lo)/(hi-lo)*(x1-x0);
+  const sy=(v)=>y0-(v-lo)/(hi-lo)*(y0-y1);
+
+  // grid + ticks
+  ctx.strokeStyle="#e6edf4"; ctx.fillStyle="#8aa0b4"; ctx.lineWidth=1;
+  ctx.font="12px Segoe UI, sans-serif"; ctx.textAlign="center";
+  for(let v=0; v<=260; v+=40){
+    ctx.beginPath(); ctx.moveTo(sx(v),y0); ctx.lineTo(sx(v),y1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x0,sy(v)); ctx.lineTo(x1,sy(v)); ctx.stroke();
+    ctx.fillText(v, sx(v), y0+18);
+    ctx.textAlign="right"; ctx.fillText(v, x0-8, sy(v)+4); ctx.textAlign="center";
+  }
+  // axis labels
+  ctx.fillStyle="#5a7186"; ctx.fillText("reference BPM (generated)",(x0+x1)/2,H-14);
+  ctx.save(); ctx.translate(16,(y0+y1)/2); ctx.rotate(-Math.PI/2);
+  ctx.fillText("measured BPM (DUT)",0,0); ctx.restore();
+
+  // ideal y=x line (dashed grey)
+  ctx.strokeStyle="#b9c6d3"; ctx.setLineDash([6,5]); ctx.beginPath();
+  ctx.moveTo(sx(0),sy(0)); ctx.lineTo(sx(260),sy(260)); ctx.stroke(); ctx.setLineDash([]);
+
+  // fitted line (blue): meas = gain*ref + offset
+  ctx.strokeStyle="#0b6fb8"; ctx.lineWidth=2.4; ctx.beginPath();
+  ctx.moveTo(sx(0), sy(gain*0+offset)); ctx.lineTo(sx(260), sy(gain*260+offset)); ctx.stroke();
+
+  // points
+  pts.forEach(p=>{
+    if(!p.meas) return;                 // skip not-yet-measured points
+    ctx.fillStyle="#0ea5a3"; ctx.beginPath(); ctx.arc(sx(p.ref),sy(p.meas),5,0,7); ctx.fill();
+    ctx.strokeStyle="#0a5a95"; ctx.stroke();
+  });
+
+  // legend
+  ctx.textAlign="left"; ctx.font="12px Segoe UI, sans-serif";
+  ctx.fillStyle="#0ea5a3"; ctx.fillText("\u25CF measured points", x0+8, y1+6);
+  ctx.fillStyle="#0b6fb8"; ctx.fillText("\u2014 fitted line",      x0+8, y1+24);
+  ctx.fillStyle="#b9c6d3"; ctx.fillText("-- ideal (y = x)",        x0+8, y1+42);
+}
+
+async function cmd(p){ try{ await fetch(API+p,{cache:"no-store"});}catch(e){} setTimeout(poll,150); }
+$("btnStart").addEventListener("click",()=>cmd("/start"));
+$("btnStop").addEventListener("click", ()=>cmd("/stop"));
+$("mTest").addEventListener("click",  ()=>cmd("/mode?m=test"));
+$("mCal").addEventListener("click",   ()=>cmd("/mode?m=cal"));
+
+poll(); setInterval(poll,1000);
+</script>
+</body>
+</html>
+)HTMLPAGE";
+
+#endif  // INDEX_HTML_H
