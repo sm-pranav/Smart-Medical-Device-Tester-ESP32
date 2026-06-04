@@ -108,3 +108,63 @@ unsigned long lastReportMs = 0;
 unsigned long lastBeatSeenMs = 0;     // for "no signal -> BPM 0" timeout
 
 // =============================================================================
+//  SETUP
+// =============================================================================
+void setup() {
+  Serial.begin(115200);                                  // USB debug
+  Serial2.begin(115200, SERIAL_8N1, PIN_RX2, PIN_TX2);   // link to Tester
+
+  // Pull-DOWN so that if you leave LO+/LO- unwired (they are optional) the pins
+  // read LOW = "leads connected" instead of floating and reporting random
+  // leads-off alarms. The AD8232 drives these pins hard, so it still overrides
+  // the internal pull-down when it really does detect an open lead.
+  pinMode(PIN_LO_P, INPUT_PULLDOWN);
+  pinMode(PIN_LO_N, INPUT_PULLDOWN);
+  analogReadResolution(12);                 // 0..4095
+  analogSetPinAttenuation(PIN_ECG, ADC_11db); // full 0..~3.3 V range
+
+  // seed the baseline with a first reading so it settles fast
+  baseline = analogRead(PIN_ECG);
+
+  Serial.println();
+  Serial.println(F("=============================================="));
+  Serial.println(F("  DUT ECG MONITOR (ESP32 #2)  -  stand-in DUT"));
+  Serial.println(F("  Sampling AD8232 on GPIO34 at 250 Hz"));
+  Serial.println(F("  Reporting: BPM=.. AMP=.. LO=..  on UART2"));
+#if TEST_MODE
+  Serial.println(F("  TEST_MODE = 1  -> printing raw ADC values"));
+#endif
+  Serial.println(F("=============================================="));
+
+  for (int i = 0; i < RR_AVG_N; i++) rrBuf[i] = 0;
+  lastSampleUs   = micros();
+  lastBeatSeenMs = millis();
+}
+
+// =============================================================================
+//  MAIN LOOP  - steady 250 Hz sampler + once-a-second report
+// =============================================================================
+void loop() {
+  unsigned long nowUs = micros();
+
+  // ---- take one sample every SAMPLE_US (steady scheduler) ----
+  if ((long)(nowUs - lastSampleUs) >= SAMPLE_US) {
+    lastSampleUs += SAMPLE_US;          // advance by a fixed step (keeps cadence)
+    processSample();
+  }
+
+  // ---- send a report about once per second ----
+  unsigned long nowMs = millis();
+  if (nowMs - lastReportMs >= 1000) {
+    lastReportMs = nowMs;
+    sendReport(nowMs);
+  }
+}
+
+// =============================================================================
+//  processSample()  - read one ADC sample and run the R-peak detector
+// =============================================================================
+void processSample() {
+  int raw = analogRead(PIN_ECG);
+
+#if TEST_MODE
