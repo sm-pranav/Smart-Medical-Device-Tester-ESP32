@@ -168,3 +168,63 @@ void processSample() {
   int raw = analogRead(PIN_ECG);
 
 #if TEST_MODE
+  // In test mode we just stream raw values so you can see the waveform in the
+  // Serial Plotter and tune AFE_GAIN / thresholds. No detection output.
+  Serial.println(raw);
+  return;
+#endif
+
+  // ---- 1) baseline removal (simple high-pass) ----
+  // baseline slowly follows the DC level; signal is what is left after removing it
+  baseline += BASELINE_A * (raw - baseline);
+  float signal = raw - baseline;         // now centred near zero
+  float mag = fabs(signal);
+
+  // ---- 2) adaptive envelope (tracks recent peak size) ----
+  envelope *= ENV_DECAY;                  // slowly decay
+  if (mag > envelope) envelope = mag;     // jump up to new peaks
+  if (envelope < MIN_ENV_COUNTS) envelope = MIN_ENV_COUNTS;
+
+  float threshold = THRESH_FRAC * envelope;
+
+  // ---- 3) rising-edge threshold crossing + refractory ----
+  unsigned long nowMs = millis();
+  bool nowAbove = (signal > threshold);
+
+  if (nowAbove && !aboveThr) {
+    // just crossed upward -> candidate R-peak
+    if (nowMs - lastBeatMs >= (unsigned long)REFRACTORY_MS) {
+      registerBeat(nowMs, signal);
+    }
+  }
+  aboveThr = nowAbove;
+  lastSignal = signal;
+
+  // ---- 4) track the true peak height during the beat (for amplitude) ----
+  // While above threshold, remember the tallest signal value of this beat.
+  if (nowAbove && signal > lastRHeight) lastRHeight = signal;
+  if (!nowAbove && lastRHeight > 0.0f) {
+    // beat's rising portion finished: fold this peak height into the average
+    rPeakSum += lastRHeight;
+    rPeakN++;
+    if (rPeakN > 8) { rPeakSum *= 0.5f; rPeakN = 4; }  // keep it a rolling mean
+    lastRHeight = 0.0f;
+  }
+
+  // ---- 5) if no beat for a while, report nothing (no signal / leads off) ----
+  // We must clear the peak accumulator too, otherwise updateAmplitude() below
+  // would immediately re-report the last amplitude we saw and the open-input
+  // test step would never show 0.00 mV.
+  if (nowMs - lastBeatSeenMs > 3000) {
+    reportedBPM = 0;
+    reportedAMP = 0.0f;
+    rrCount     = 0;           // forget stale intervals
+    rPeakSum    = 0.0f;        // forget stale peak heights
+    rPeakN      = 0;
+  }
+
+  updateAmplitude();
+}
+
+// =============================================================================
+//  registerBeat()  - called when a valid R-peak is accepted
