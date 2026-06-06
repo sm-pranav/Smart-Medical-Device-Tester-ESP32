@@ -1,4 +1,4 @@
-﻿/* =============================================================================
+/* =============================================================================
    DUT MONITOR  -  ESP32 #2  (the "ECG patient monitor under test")
    Smart Medical Device Tester & Calibration System
    -----------------------------------------------------------------------------
@@ -228,3 +228,61 @@ void processSample() {
 
 // =============================================================================
 //  registerBeat()  - called when a valid R-peak is accepted
+// =============================================================================
+void registerBeat(unsigned long nowMs, float peakSignal) {
+  if (lastBeatMs != 0) {
+    long rr = (long)(nowMs - lastBeatMs);     // RR interval in ms
+    if (rr >= REFRACTORY_MS && rr <= 3000) {  // plausible (20..300 BPM)
+      rrBuf[rrHead] = rr;
+      rrHead = (rrHead + 1) % RR_AVG_N;
+      if (rrCount < RR_AVG_N) rrCount++;
+      computeBPM();
+    }
+  }
+  lastBeatMs     = nowMs;
+  lastBeatSeenMs = nowMs;
+}
+
+// =============================================================================
+//  computeBPM()  - average the recent RR intervals into a BPM value
+// =============================================================================
+void computeBPM() {
+  if (rrCount == 0) { reportedBPM = 0; return; }
+  long sum = 0;
+  for (int i = 0; i < rrCount; i++) sum += rrBuf[i];
+  float meanRR = (float)sum / rrCount;        // ms
+  if (meanRR < 1) { reportedBPM = 0; return; }
+  reportedBPM = (int)(60000.0f / meanRR + 0.5f);
+}
+
+// =============================================================================
+//  updateAmplitude()  - map the averaged R-peak height (counts) to mV
+// =============================================================================
+void updateAmplitude() {
+  if (rPeakN > 0) {
+    float meanCounts = rPeakSum / rPeakN;                 // ADC counts
+    float mvAtAdc    = meanCounts * (ADC_MV_FS / ADC_COUNTS);
+    reportedAMP      = mvAtAdc / AFE_GAIN;                // back to input mV
+    if (reportedAMP < 0) reportedAMP = 0;
+  }
+}
+
+// =============================================================================
+//  sendReport()  - read leads-off and send one report line to the Tester
+// =============================================================================
+void sendReport(unsigned long nowMs) {
+  // AD8232 drives LO+ / LO- HIGH when an electrode is not connected.
+  reportedLO = (digitalRead(PIN_LO_P) == HIGH || digitalRead(PIN_LO_N) == HIGH) ? 1 : 0;
+
+  // Build the exact line the Tester expects: "BPM=59 AMP=0.98 LO=0"
+  char line[48];
+  int  ampWhole = (int)reportedAMP;
+  int  ampFrac  = (int)((reportedAMP - ampWhole) * 100.0f + 0.5f);
+  if (ampFrac >= 100) { ampWhole++; ampFrac -= 100; }
+  snprintf(line, sizeof(line), "BPM=%d AMP=%d.%02d LO=%d",
+           reportedBPM, ampWhole, ampFrac, reportedLO);
+
+  Serial2.println(line);   // to the Tester
+  Serial.print(F("[report] "));
+  Serial.println(line);    // to USB for debugging
+}
