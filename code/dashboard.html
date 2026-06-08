@@ -148,3 +148,93 @@
     <section class="card">
       <h2>Heart rate</h2>
       <div class="read">
+        <div><span class="big num" id="measBpm">0</span> <span class="u">BPM measured</span></div>
+        <div class="gen">generated<br><b class="num" id="genBpm">0</b> BPM</div>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Amplitude</h2>
+      <div class="read">
+        <div><span class="big num" id="measAmp">0.00</span> <span class="u">mV measured</span></div>
+        <div class="gen">generated<br><b class="num" id="genAmp">0.00</b> mV</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Lead status</h2>
+      <div id="loBadge" class="badge lo-ok"><span class="bd"></span><span id="loText">Leads connected</span></div>
+    </section>
+    <section class="card">
+      <h2>Current step</h2>
+      <div class="read"><div><span class="big num" id="curStep">0</span> <span class="u">of <span id="curTot">0</span></span></div>
+      <div class="gen"><b id="curVerdict">--</b></div></div>
+    </section>
+  </div>
+
+  <!-- STEP TABLE -->
+  <section class="card">
+    <h2>Automated test plan</h2>
+    <table>
+      <thead><tr><th>#</th><th>Gen BPM</th><th>Gen mV</th><th>Meas BPM</th><th>Meas mV</th><th>Verdict</th></tr></thead>
+      <tbody id="stepBody"></tbody>
+    </table>
+  </section>
+
+  <!-- CALIBRATION -->
+  <section class="card">
+    <h2>Calibration curve (reference vs measured BPM)</h2>
+    <div class="calhead">
+      <div><span class="num" id="calGain">1.000</span><small>gain</small></div>
+      <div><span class="num" id="calOffset">0.00</span><small>offset (BPM)</small></div>
+      <div><span class="num" id="calErr">0.00</span><small>max error (BPM)</small></div>
+    </div>
+    <canvas id="calCanvas" width="1000" height="520"></canvas>
+  </section>
+</main>
+
+<div class="foot">
+  Student research prototype &mdash; proof-of-concept ECG tester with a self-built stand-in monitor.
+  <b>Not a medical device</b>, not a certified analyzer, not for clinical use. Low-voltage bench signal only.
+</div>
+
+<script>
+const API = (location.protocol === "file:") ? "http://192.168.4.1" : "";
+const $ = (id) => document.getElementById(id);
+
+function setConn(ok){
+  $("dot").classList.toggle("on", ok);
+  $("connText").textContent = ok ? "Connected to MedTester" : "Tester offline";
+}
+function fmtUp(s){ s=Math.floor(s); if(s<60)return s+"s"; const m=(s/60)|0,r=s%60;
+  if(m<60)return m+"m "+r+"s"; const h=(m/60)|0; return h+"h "+(m%60)+"m"; }
+
+async function poll(){
+  try{
+    const res = await fetch(API+"/data",{cache:"no-store"});
+    if(!res.ok) throw 0;
+    render(await res.json());
+    setConn(true);
+  }catch(e){ setConn(false); }
+}
+
+function render(d){
+  // overall verdict box
+  const vb = $("verdict"); const ov = d.overall || "--";
+  vb.textContent = ov;
+  vb.className = "verdict " + (ov==="PASS"?"v-pass":ov==="FAIL"||ov==="FAULT"?"v-fail":ov==="RUNNING"?"v-run":"v-na");
+
+  $("stState").textContent = d.state || "--";
+  $("stMode").textContent  = d.mode || "--";
+  $("stStep").textContent  = (d.step||0)+"/"+(d.total_steps||0);
+  $("stPF").textContent    = (d.pass_count||0)+" / "+(d.fail_count||0);
+  $("stUp").textContent    = fmtUp(d.uptime_s||0);
+
+  $("measBpm").textContent = d.meas_bpm||0;
+  $("genBpm").textContent  = Math.round(d.gen_bpm||0);
+  $("measAmp").textContent = (Number(d.meas_amp)||0).toFixed(2);
+  $("genAmp").textContent  = (Number(d.gen_amp)||0).toFixed(2);
+
+  const lo = $("loBadge");
+  if(Number(d.leads_off)===1){ lo.className="badge lo-off"; $("loText").textContent="Leads OFF detected"; }
