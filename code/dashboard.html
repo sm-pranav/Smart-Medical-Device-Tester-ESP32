@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -238,3 +238,86 @@ function render(d){
 
   const lo = $("loBadge");
   if(Number(d.leads_off)===1){ lo.className="badge lo-off"; $("loText").textContent="Leads OFF detected"; }
+  else { lo.className="badge lo-ok"; $("loText").textContent="Leads connected"; }
+
+  $("curStep").textContent = d.step||0;
+  $("curTot").textContent  = d.total_steps||0;
+  $("curVerdict").textContent = d.verdict||"--";
+
+  // mode buttons active state
+  $("mTest").classList.toggle("active", d.mode==="TEST");
+  $("mCal").classList.toggle("active", d.mode==="CAL");
+
+  // step table
+  const tb = $("stepBody"); tb.innerHTML="";
+  (d.steps||[]).forEach(s=>{
+    const tr=document.createElement("tr");
+    if(s.n===d.step && (d.state==="TESTING")) tr.className="cur";
+    const vc = s.v==="PASS"?"v-pass":s.v==="FAIL"?"v-fail":"v-na";
+    tr.innerHTML = "<td>"+s.n+"</td><td>"+Math.round(s.gb)+"</td><td>"+Number(s.ga).toFixed(1)+
+      "</td><td>"+(s.v==="--"?"-":s.mb)+"</td><td>"+(s.v==="--"?"-":Number(s.ma).toFixed(2))+
+      "</td><td class='"+vc+"'>"+s.v+"</td>";
+    tb.appendChild(tr);
+  });
+
+  // calibration
+  $("calGain").textContent   = (Number(d.cal_gain)||0).toFixed(3);
+  $("calOffset").textContent = (Number(d.cal_offset)||0).toFixed(2);
+  $("calErr").textContent    = (Number(d.cal_max_err)||0).toFixed(2);
+  drawCal(d.cal||[], Number(d.cal_gain)||1, Number(d.cal_offset)||0);
+}
+
+function drawCal(pts, gain, offset){
+  const cv=$("calCanvas"), ctx=cv.getContext("2d");
+  const W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H);
+  const pad=54, x0=pad, y0=H-pad, x1=W-20, y1=20;
+  const lo=0, hi=260;                   // BPM axis range for both axes
+  const sx=(v)=>x0+(v-lo)/(hi-lo)*(x1-x0);
+  const sy=(v)=>y0-(v-lo)/(hi-lo)*(y0-y1);
+
+  // grid + ticks
+  ctx.strokeStyle="#e6edf4"; ctx.fillStyle="#8aa0b4"; ctx.lineWidth=1;
+  ctx.font="12px Segoe UI, sans-serif"; ctx.textAlign="center";
+  for(let v=0; v<=260; v+=40){
+    ctx.beginPath(); ctx.moveTo(sx(v),y0); ctx.lineTo(sx(v),y1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x0,sy(v)); ctx.lineTo(x1,sy(v)); ctx.stroke();
+    ctx.fillText(v, sx(v), y0+18);
+    ctx.textAlign="right"; ctx.fillText(v, x0-8, sy(v)+4); ctx.textAlign="center";
+  }
+  // axis labels
+  ctx.fillStyle="#5a7186"; ctx.fillText("reference BPM (generated)",(x0+x1)/2,H-14);
+  ctx.save(); ctx.translate(16,(y0+y1)/2); ctx.rotate(-Math.PI/2);
+  ctx.fillText("measured BPM (DUT)",0,0); ctx.restore();
+
+  // ideal y=x line (dashed grey)
+  ctx.strokeStyle="#b9c6d3"; ctx.setLineDash([6,5]); ctx.beginPath();
+  ctx.moveTo(sx(0),sy(0)); ctx.lineTo(sx(260),sy(260)); ctx.stroke(); ctx.setLineDash([]);
+
+  // fitted line (blue): meas = gain*ref + offset
+  ctx.strokeStyle="#0b6fb8"; ctx.lineWidth=2.4; ctx.beginPath();
+  ctx.moveTo(sx(0), sy(gain*0+offset)); ctx.lineTo(sx(260), sy(gain*260+offset)); ctx.stroke();
+
+  // points
+  pts.forEach(p=>{
+    if(!p.meas) return;                 // skip not-yet-measured points
+    ctx.fillStyle="#0ea5a3"; ctx.beginPath(); ctx.arc(sx(p.ref),sy(p.meas),5,0,7); ctx.fill();
+    ctx.strokeStyle="#0a5a95"; ctx.stroke();
+  });
+
+  // legend
+  ctx.textAlign="left"; ctx.font="12px Segoe UI, sans-serif";
+  ctx.fillStyle="#0ea5a3"; ctx.fillText("\u25CF measured points", x0+8, y1+6);
+  ctx.fillStyle="#0b6fb8"; ctx.fillText("\u2014 fitted line",      x0+8, y1+24);
+  ctx.fillStyle="#b9c6d3"; ctx.fillText("-- ideal (y = x)",        x0+8, y1+42);
+}
+
+async function cmd(p){ try{ await fetch(API+p,{cache:"no-store"});}catch(e){} setTimeout(poll,150); }
+$("btnStart").addEventListener("click",()=>cmd("/start"));
+$("btnStop").addEventListener("click", ()=>cmd("/stop"));
+$("mTest").addEventListener("click",  ()=>cmd("/mode?m=test"));
+$("mCal").addEventListener("click",   ()=>cmd("/mode?m=cal"));
+
+poll(); setInterval(poll,1000);
+</script>
+</body>
+</html>
