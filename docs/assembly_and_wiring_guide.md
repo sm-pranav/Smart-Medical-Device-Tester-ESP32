@@ -66,3 +66,115 @@ plug-in.
 
 ---
 
+## 3. Wiring - Breadboard First
+
+Read this whole section before plugging anything in. Wire with the USB cables unplugged, then plug in
+to power once each sub-section is done.
+
+### 3.0 The one rule that matters most
+
+> **Tie ALL grounds together.** Both ESP32 boards, the AD8232, the OLED, the buttons, the LEDs - every
+> GND pin must connect to the same ground rail on the breadboard. If the two boards do not share
+> ground, the UART link will produce garbage and the injected ECG will float. When in doubt, add
+> another ground jumper.
+
+And the second rule:
+
+> **Never feed 3.3 V straight into the AD8232 input.** The AD8232 expects a signal around **1 millivolt**
+> (0.001 V). The ESP32 DAC puts out up to 3.3 V. We shrink that by about 1000x with a resistor divider
+> and pass it through a capacitor before it reaches the AD8232. Skipping the divider will just peg the
+> front-end and you will get nonsense readings.
+
+### 3.1 Tester ESP32 (#1) <-> OLED
+
+| Tester ESP32 pin | OLED pin | Notes |
+|:--|:--|:--|
+| 3V3 | VCC | Power |
+| GND | GND | Common ground |
+| GPIO21 | SDA | I2C data |
+| GPIO22 | SCL | I2C clock |
+
+```
+   TESTER ESP32                 OLED (SSD1306, 0x3C)
+   +----------+                 +-----------------+
+   |     3V3  |---------------->| VCC             |
+   |     GND  |---------------->| GND             |
+   |  GPIO21  |--- SDA -------->| SDA             |
+   |  GPIO22  |--- SCL -------->| SCL             |
+   +----------+                 +-----------------+
+```
+
+### 3.2 Tester ESP32 (#1) <-> buttons, LEDs, buzzer
+
+Buttons use the ESP32's internal pull-ups, so one leg goes to the GPIO and the other leg goes to GND.
+No extra resistor needed for the buttons. LEDs get a 220 ohm resistor in series (long leg = positive =
+to the GPIO through the resistor, short leg = to GND).
+
+| Tester ESP32 pin | Connects to | Notes |
+|:--|:--|:--|
+| GPIO32 | Button 1, one leg | Other leg of button 1 -> GND (Start/Stop) |
+| GPIO33 | Button 2, one leg | Other leg of button 2 -> GND (Mode: Test/Calibrate) |
+| GPIO26 | 220 ohm -> Green LED + leg | Green LED - leg -> GND (PASS) |
+| GPIO27 | 220 ohm -> Red LED + leg | Red LED - leg -> GND (FAIL/FAULT) |
+| GPIO14 | Passive buzzer + | Buzzer - -> GND (optional) |
+
+```
+   GPIO32 ---[ BTN1 ]--- GND        (Start/Stop)
+   GPIO33 ---[ BTN2 ]--- GND        (Mode)
+
+   GPIO26 ---[220R]---|>|--- GND    green LED (PASS)
+   GPIO27 ---[220R]---|>|--- GND    red LED  (FAIL/FAULT)
+   GPIO14 ----------[buzzer]--- GND (optional)
+```
+
+### 3.3 The attenuator: Tester DAC -> millivolt ECG -> AD8232 input
+
+This is the heart of the bench and the part to build carefully. The ESP32 DAC on **GPIO25** puts out
+0 to 3.3 V. We do two things to it:
+
+1. **Shrink it ~1000x** with a voltage divider so 1 V at the DAC becomes about 1 mV at the AD8232.
+2. **AC-couple it** through a 1 uF capacitor so only the moving ECG shape passes and the steady DC
+   level is blocked (the AD8232 sets its own reference internally).
+
+Build this small chain on the breadboard:
+
+```
+  TESTER GPIO25 (DAC)
+        |
+        +---[ 100 kohm ]---+------)|(-----> AD8232  RA pad (+ input)
+                           |     1uF
+                        [ 100 ohm ]
+                           |
+                          GND  (shared with everything)
+```
+
+- The **100 kohm** goes in series from the DAC pin to a middle node.
+- The **100 ohm** goes from that middle node to **GND**. The middle node now carries about 1/1000 of
+  the DAC voltage (100 / (100000 + 100) is close to 1/1000).
+- From the middle node, go through the **1 uF capacitor** into the AD8232's **RA** pad (the + input).
+- Tie the AD8232's **LA** and **RL** pads to the shared **GND** through a 10 kohm each (a simple
+  reference). Many AD8232 boards are happy with LA and RL just referenced to ground for this bench
+  injection; if your readings are noisy, add the 10 kohm from LA to GND and RL to GND.
+
+Why these values: a real ECG R-wave is about 1 mV. The tester commands amplitudes of 0.5, 1.0 and
+2.0 mV. With the ~1/1000 divider, that means the DAC swings about 0.5 V, 1.0 V and 2.0 V - all
+comfortably inside its range. If you own a multimeter, you can verify the divider: put the DAC at a
+steady mid value (TEST_MODE does a slow ramp) and confirm the middle node reads roughly 1/1000 of the
+DAC pin voltage.
+
+> The RA / LA / RL pads are where ECG electrodes would normally clip onto a body. Here we inject our
+> synthetic signal into RA instead. This is the "proof-of-concept signal injection" - it exercises the
+> exact same front-end path a real electrode would.
+
+**Optional self-monitor jumper (only if you do not own a multimeter).** One extra wire from the Tester's
+**GPIO25 straight to its own GPIO34** lets the Tester read back its own DAC output. In `TEST_MODE` the
+DAC-ramp test then prints both the commanded value and the measured value, so you can confirm the DAC is
+working with no test gear at all. Tap it at GPIO25 (before the divider), never after it - after the
+divider the signal is millivolts and the ADC cannot resolve it. Skip this wire entirely if you have a
+multimeter; the firmware does not need it in normal operation.
+
+| Tester ESP32 pin | Connects to | Notes |
+|:--|:--|:--|
+| GPIO34 (ADC1) | Tester GPIO25 (the DAC pin) | Optional. Input-only ADC1 pin. Used only by `TEST_MODE`; not needed for normal runs. |
+
+### 3.4 DUT ESP32 (#2) <-> AD8232
