@@ -258,3 +258,83 @@ crossed, or the grounds are not tied. The link runs at 115200 baud.
 ---
 
 ## 4. Test Each Part Alone Before Combining
+
+### 4.0 First, how the sketches are laid out (this matters)
+
+```
+code/
+  tester_esp32/
+    tester_esp32.ino      <- open THIS one for the Tester
+    index_html.h          <- the dashboard page; must stay in this folder
+  dut_monitor_esp32/
+    dut_monitor_esp32.ino <- open THIS one for the DUT
+```
+
+Each sketch has its own folder, named exactly like its `.ino` file. That is not just tidiness - the
+Arduino IDE compiles **every** `.ino` in a folder together as one program, so if both sketches sit in
+the same folder the build fails with errors like `redefinition of 'const int PIN_TX2'` and two
+`setup()` functions. Keep them in separate folders and open one at a time.
+
+`index_html.h` holds the dashboard web page. The Arduino IDE will show it as a second tab next to the
+Tester sketch, which is normal - do not delete it or move it. (The page has to live in a `.h` file
+because the IDE tries to read the page's JavaScript as C++ if you put it directly in the `.ino`.)
+
+You will need libraries `Adafruit SSD1306` and `Adafruit GFX Library` from Library Manager for the
+Tester; accept the prompt to also install `Adafruit BusIO`, which they depend on. The DUT sketch needs
+no libraries. Set Board to **ESP32 Dev Module** for both.
+
+Now bring up one piece at a time. Do not wire everything and hope. Both sketches have a
+`#define TEST_MODE` switch near the top - set it to `1`, upload, watch the Serial Monitor (115200 baud),
+then set it back to `0` for normal use.
+
+### 4.1 OLED / I2C scanner (Tester)
+
+Set `#define TEST_MODE 1` in `tester_esp32.ino` and upload. The first thing it does is scan the I2C
+bus and print any addresses it finds. You want to see `found 0x3C`. If you see `0x3D`, change
+`OLED_ADDR` to `0x3D` in the sketch. If you see nothing, SDA/SCL are swapped or there is no shared
+ground.
+
+### 4.2 DAC ramp (Tester)
+
+Still in TEST_MODE, the Tester slowly ramps GPIO25 from 0 to full and back over a few seconds. Put a
+multimeter on GPIO25 and watch the voltage climb from ~0 V to ~3.3 V. Then move the meter to the
+middle node of the divider and confirm it reads roughly 1/1000 of that (a few millivolts). This
+proves the DAC and the attenuator both work.
+
+### 4.3 AD8232 raw read (DUT)
+
+Set `#define TEST_MODE 1` in `dut_monitor_esp32.ino` and upload. It streams the raw ADC value from
+GPIO34. Open the Arduino **Serial Plotter** (Tools menu) at 115200 baud. With the tester injecting a
+signal you will see a moving ECG-like trace. With no signal you will see a flatish line near mid-scale.
+This is also where you tune `AFE_GAIN` if the amplitude reading is off.
+
+### 4.4 UART loopback / echo
+
+With both boards flashed (DUT normal, Tester in TEST_MODE), the Tester's test routine echoes anything
+the DUT sends. You should see lines like `BPM=59 AMP=0.98 LO=0` scroll past in the Tester's Serial
+Monitor. If you see nothing, the TX/RX are not crossed or grounds are not tied. If you see garbled
+text, check that both are at 115200 baud.
+
+### 4.5 Button test (Tester)
+
+TEST_MODE prints the two button states for a few seconds. Press each button and confirm the printed
+value flips between 1 and 0. If a button never changes, its second leg is not on GND.
+
+Once every piece checks out, set both `TEST_MODE` back to `0` and re-upload.
+
+---
+
+## 5. Bench Layout
+
+Keep it tidy so the demo photographs well and behaves reliably:
+
+- Put the two ESP32 boards on one long breadboard (or two small ones side by side), USB ports facing
+  out so you can plug both cables in.
+- Build the attenuator (100k, 100 ohm, 1 uF) as a tight little cluster right next to the AD8232. Keep
+  the wire from the divider node to the AD8232 RA pad **short** - long analog wires pick up hum.
+- Run the two UART jumpers and the ground jumper between the boards as a neat little bundle.
+- Put the OLED, the two buttons, and the two LEDs along the front edge near the Tester so they are the
+  "face" of the instrument.
+- Optional: mount the whole breadboard in a small clear project box with the OLED and buttons on the
+  lid. This makes it look like a real bench instrument.
+
