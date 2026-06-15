@@ -178,3 +178,83 @@ multimeter; the firmware does not need it in normal operation.
 | GPIO34 (ADC1) | Tester GPIO25 (the DAC pin) | Optional. Input-only ADC1 pin. Used only by `TEST_MODE`; not needed for normal runs. |
 
 ### 3.4 DUT ESP32 (#2) <-> AD8232
+
+| DUT ESP32 pin | AD8232 pin | Notes |
+|:--|:--|:--|
+| 3V3 | 3.3V | Power the front-end |
+| GND | GND | Common ground (shared with the Tester) |
+| GPIO34 | OUTPUT | The amplified/filtered ECG -> ADC1 input-only pin |
+| GPIO25 | LO+ | Leads-off detect (optional) |
+| GPIO26 | LO- | Leads-off detect (optional) |
+
+```
+   DUT ESP32                    AD8232
+   +----------+                 +-----------------+
+   |     3V3  |---------------->| 3.3V            |
+   |     GND  |---------------->| GND             |
+   |  GPIO34  |<--- OUTPUT -----| OUTPUT          |
+   |  GPIO25  |<--- LO+ --------| LO+  (optional) |
+   |  GPIO26  |<--- LO- --------| LO-  (optional) |
+   +----------+                 | RA <- injected mV from the attenuator (3.3)
+                                | LA, RL -> reference to GND (via 10k)
+                                +-----------------+
+```
+
+Leave the AD8232 `SDN` pad unconnected (or tie to 3.3V) so the chip stays awake.
+
+**About LO+ / LO- (leads-off).** These two wires are genuinely optional. The firmware sets those pins to
+`INPUT_PULLDOWN`, so if you leave them unwired they read as "leads connected" and everything still works
+- you will not get random false leads-off alarms. Wire them if you want the dashboard's lead badge to be
+live. Be aware that the AD8232 detects a *truly open electrode* by DC path, and this bench feeds the
+front-end through a capacitor rather than real electrodes, so on many modules the badge will simply stay
+on "Leads connected" for the whole run. That is not a fault. If you want to watch the badge flip, unclip
+the **LA** or **RL** reference wire while the bench is running - that is a real open-lead condition.
+
+### 3.5 The UART cross-link (Tester <-> DUT)
+
+The two boards talk over a serial link. The golden rule of serial wiring is **TX goes to RX** and
+**RX goes to TX** - crossed over. Both boards are 3.3 V, so no level shifter is needed. They must
+share ground (again).
+
+| Tester ESP32 | DUT ESP32 | Notes |
+|:--|:--|:--|
+| GPIO17 (TX2) | GPIO16 (RX2) | Tester sends -> DUT receives |
+| GPIO16 (RX2) | GPIO17 (TX2) | DUT sends -> Tester receives |
+| GND | GND | Shared ground (essential) |
+
+```
+   TESTER GPIO17 (TX) ------------> GPIO16 (RX) DUT
+   TESTER GPIO16 (RX) <------------ GPIO17 (TX) DUT
+   TESTER GND        <------------> GND        DUT
+```
+
+If you see garbage characters or nothing at all on the link, 9 times out of 10 the TX/RX are not
+crossed, or the grounds are not tied. The link runs at 115200 baud.
+
+### 3.6 Full wiring at a glance
+
+```
+                         COMMON GROUND RAIL  (all GND pins land here)
+   ================================================================================
+
+   TESTER ESP32 #1                                  DUT ESP32 #2
+   ---------------                                  --------------
+   GPIO25 DAC --[100k]--+--)|(1uF-- AD8232 RA        GPIO34 <-- AD8232 OUTPUT
+                        |                            GPIO25 <-- AD8232 LO+
+                     [100 ohm]                       GPIO26 <-- AD8232 LO-
+                        |                            3V3    --> AD8232 3.3V
+                       GND                           GND    --> AD8232 GND
+   GPIO21 SDA --> OLED SDA
+   GPIO22 SCL --> OLED SCL                           GPIO17 TX2 --> TESTER GPIO16 RX2
+   GPIO32 --> Start/Stop button --> GND              GPIO16 RX2 <-- TESTER GPIO17 TX2
+   GPIO33 --> Mode button --> GND
+   GPIO26 --[220R]-->|>|-- GND  green
+   GPIO27 --[220R]-->|>|-- GND  red
+   GPIO14 --> buzzer --> GND (optional)
+   GPIO17 TX2 --> DUT GPIO16 RX2
+   GPIO16 RX2 <-- DUT GPIO17 TX2
+```
+
+---
+
+## 4. Test Each Part Alone Before Combining
