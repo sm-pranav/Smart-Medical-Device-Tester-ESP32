@@ -1,4 +1,4 @@
-﻿# Assembly & Wiring Guide - Smart Medical Device Tester
+# Assembly & Wiring Guide - Smart Medical Device Tester
 
 This is the click-simple build guide. If you can plug jumper wires into a breadboard and click
 Upload in the Arduino IDE, you can build this. Everything is written for someone who has never
@@ -338,3 +338,38 @@ Keep it tidy so the demo photographs well and behaves reliably:
 - Optional: mount the whole breadboard in a small clear project box with the OLED and buttons on the
   lid. This makes it look like a real bench instrument.
 
+## 6. Powering It
+
+Simplest path: plug **both** ESP32 boards into USB - one to your PC (to see the Serial Monitor) and
+one to a phone charger or the second USB port. That is enough to run the full demo.
+
+Standalone: power both boards from a single USB power bank using a short two-port cable or a small
+USB hub, so the bench runs with no computer. The dashboard is served by the Tester itself, so a phone
+is the only "screen" you need.
+
+> Even when the two boards are powered from different USB sources, **their grounds must still be tied
+> together** with a jumper. Different USB chargers do not share a ground otherwise, and the UART link
+> and the injected signal both depend on a common ground.
+
+## 7. Troubleshooting
+
+| Symptom | Likely cause and fix |
+|:--|:--|
+| Won't compile: `redefinition of 'const int PIN_TX2'`, or two `setup()` functions | Both sketches are in one folder. Arduino builds every `.ino` in a folder together. Put each in its own folder named after its `.ino` (see 4.0). |
+| Won't compile: `'function' does not name a type; did you mean 'union'?` | The dashboard page ended up inside the `.ino`. It must stay in `index_html.h` in the Tester's folder (see 4.0). |
+| Won't compile: `Adafruit_SSD1306.h: No such file or directory` | Libraries missing. Library Manager: install `Adafruit SSD1306` and `Adafruit GFX Library`, accept `Adafruit BusIO`. |
+| OLED stays blank | Not on 3V3, SDA/SCL swapped, or wrong address. Run TEST_MODE, look for `found 0x3C`. If it shows `0x3D`, set `OLED_ADDR` to `0x3D`. |
+| I2C scan finds nothing | SDA/SCL swapped or no shared ground. Re-seat the four wires; OLED VCC on 3V3. |
+| DUT always reports `BPM=0` | No signal reaching the AD8232. Check the attenuator chain and the 1 uF cap orientation, confirm the AD8232 is powered (3.3V + GND), and that RA carries the injected signal. Run the DUT in TEST_MODE and look at the raw trace in the Serial Plotter. |
+| BPM is wildly wrong / jumpy | Divider ratio off, poor grounding, or noise pickup. Shorten the analog wire to RA, make sure the 100 ohm is to ground, and confirm all grounds are tied. Increase `THRESH_FRAC` in the DUT slightly if noise causes double-counting. |
+| Amplitude reading looks low, especially at 2 mV | Expected. The AD8232 has a fixed gain (~1100) and the ESP32 ADC tops out at ~3.3 V, so signals above roughly 1.5 mV start to clip. The 2.0 mV step exercises the top of the front-end's range on purpose. Tune `AFE_GAIN` in the DUT so a known 1.0 mV reads back near 1.00. |
+| UART shows garbage | Baud mismatch (both must be 115200) or TX/RX not crossed. Tester GPIO17 -> DUT GPIO16, Tester GPIO16 <- DUT GPIO17. |
+| UART shows nothing / FAULT on screen | TX/RX swapped the wrong way, or grounds not tied. The Tester declares FAULT if it gets no report for 4 seconds. |
+| `MedTester` Wi-Fi not visible | Wait ~10 s after boot. Check the Serial Monitor prints `SoftAP 'MedTester' at http://192.168.4.1`. Move closer to the board. |
+| Dashboard will not load | Use `http://192.168.4.1` (not https). Ignore the phone's "no internet" warning for that network and stay connected. |
+| DAC output looks wrong on the meter | Confirm you are probing GPIO25 (DAC1), not another pin. In TEST_MODE the ramp is slow; a fast meter helps. |
+| ESP32 resets or browns out | Power dip. Use a decent USB source or a power bank with an always-on mode; keep the boards separate USB ports if one is struggling. |
+| Green and red LEDs both off during a run | Normal until the first step verdict lands (about 7 seconds in). They light per-step after that. |
+
+Once the parts pass their individual tests and the two boards are cross-wired with a shared ground,
+flash both in normal mode, press Start on the Tester, and the automated test plan will run.
