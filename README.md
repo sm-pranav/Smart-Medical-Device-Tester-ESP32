@@ -218,3 +218,128 @@ DUT sketch needs no libraries at all.
 
 ## Setup and run
 
+1. **Install ESP32 board support.** In the Arduino IDE open Preferences and add this to Additional
+   Boards Manager URLs:
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+   Then in Boards Manager search for `esp32` (by Espressif) and install it.
+2. **Install the OLED libraries.** In Library Manager install `Adafruit SSD1306` and
+   `Adafruit GFX Library`.
+3. **Wire both boards** per the pin maps above. Build the attenuator (100 kohm, 100 ohm, 1 uF) right
+   next to the AD8232 and keep the wire to the RA pad short. Cross the UART lines (Tester TX to DUT RX,
+   Tester RX to DUT TX) and tie all grounds together.
+4. **Flash the DUT.** Open `code/dut_monitor_esp32/dut_monitor_esp32.ino`, set Board to
+   `ESP32 Dev Module`, select the DUT's COM port, and Upload. For a first bring-up you can set
+   `#define TEST_MODE 1` to stream the raw ADC value into the Serial Plotter, then set it back to `0`.
+5. **Flash the Tester.** Open `code/tester_esp32/tester_esp32.ino`, select the Tester's COM port, and
+   Upload. The IDE will show `index_html.h` as a second tab; that is expected and it must stay in the
+   same folder. The Serial Monitor at 115200 baud should print that the SoftAP came up at
+   `http://192.168.4.1`. TEST_MODE here runs an I2C scan, a DAC ramp, a button check and a UART echo.
+6. **Power on.** With both boards powered, the OLED shows a status screen and the `MedTester` Wi-Fi
+   network appears.
+7. **Connect and open the dashboard.** On a phone or laptop, join Wi-Fi `MedTester` (password
+   `medtest123`) and open `http://192.168.4.1`. Ignore the "no internet" warning for that network.
+8. **Run a test.** Press Start on the bench, or the Start button on the dashboard. The ten-step plan
+   runs and each step shows PASS or FAIL.
+9. **Run a calibration.** With the bench idle, press Mode (or the Calibrate button on the dashboard) to
+   switch to calibration, then Start. The sweep runs and the calibration chart and gain/offset/error
+   fill in.
+10. **Log a run (optional).** With a PC on the `MedTester` network:
+    ```
+    pip install requests        # optional; the script falls back to the standard library
+    python code/report_logger.py
+    ```
+    It writes a timestamped CSV. Options: `python code/report_logger.py --host 192.168.4.1 --interval 1.0 --out run1.csv`
+
+Both sketches are confirmed to build clean against ESP32 core 3.3.11 with Adafruit SSD1306 2.5.17,
+Adafruit GFX 1.12.6 and Adafruit BusIO 1.17.4 (BusIO is pulled in automatically as a dependency, so
+accept the IDE's prompt to install it). For reference, the compiler reports:
+
+| Sketch | Flash | RAM |
+|---|---|---|
+| `dut_monitor_esp32` | 280,512 bytes (21%) | 22,284 bytes (6%) |
+| `tester_esp32` | 1,006,792 bytes (76%) | 50,072 bytes (15%) |
+
+The tester is the larger one because it links WiFi, WebServer and the embedded dashboard page. 76% of
+the default 1.31 MB app partition still leaves room, but it is worth knowing if you plan to add much.
+
+## How to verify it works
+
+On boot the Serial Monitor should show the access point starting:
+
+```
+[WiFi] SoftAP 'MedTester' at http://192.168.4.1
+[WEB ] server on port 80
+[BOOT] ready. IDLE. press Start to run.
+```
+
+Then:
+
+- Press Start in Test mode. The bench steps through the plan. For each heart-rate step the measured BPM
+  should land within the larger of plus or minus 5 BPM or 5 percent of the generated value, so the 60 BPM
+  step passes anywhere from 55 to 65 and the 240 BPM step passes from 228 to 252. The step shows PASS with
+  the green LED and the pass/fail tally climbs.
+- Watch the amplitude steps. The 0.5 and 1.0 mV steps should read close and pass. The 2.0 mV step is the
+  honest edge case: the AD8232's fixed gain and the ESP32's 3.3 V ADC ceiling mean signals above roughly
+  1.5 mV start to clip, so that step may read low and can fail. That is a real dynamic-range finding, not
+  a wiring mistake.
+- On the leads-off step the tester holds its output flat, so within about three seconds the DUT reports
+  `BPM=0 AMP=0.00` and the step passes on that basis. The dashboard's lead badge reads from the AD8232's
+  LO+/LO- pins, which detect a genuinely open electrode; because this bench injects a signal through a
+  capacitor rather than using real electrodes, the badge may stay on "Leads connected" through the whole
+  run. To see the badge actually flip, unclip the AD8232's LA or RL reference wire while it is running.
+- Switch to Calibrate and Start. Points appear on the chart near the dashed ideal line, a fitted line is
+  drawn, and gain reads near 1.000 with a small offset and a max error of a few BPM.
+- If the DUT is unplugged or the serial link is broken, within about four seconds the Tester shows FAULT
+  with the red LED, which confirms the fault-detection path.
+- The CSV from `report_logger.py` should contain a row per second across the run, with generated and
+  measured columns and verdicts. That file is your validation record.
+
+What success looks like: generated and measured heart rate agree within tolerance across the plan, the
+verdicts are correct, the calibration curve is close to the ideal line with a sensible gain and offset,
+leads-off is flagged, and the same numbers appear on the OLED, the dashboard and the CSV.
+
+## The /data JSON contract
+
+The Tester serves this JSON at `http://192.168.4.1/data`, the dashboard polls it once a second, and the
+Python logger writes the scalar keys to CSV. Keep these identical across the firmware, the dashboard and
+the logger.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `state` | string | IDLE, TESTING, CALIBRATE, COMPLETE or FAULT |
+| `state_code` | int | 0, 10, 20, 30 or 90 |
+| `mode` | string | TEST or CAL |
+| `step` | int | Current step or calibration point, 1-based |
+| `total_steps` | int | Steps in the active plan |
+| `gen_bpm` | number | Generated heart rate, BPM |
+| `gen_amp` | number | Generated R-wave amplitude, mV |
+| `meas_bpm` | int | DUT-reported heart rate, BPM |
+| `meas_amp` | number | DUT-reported amplitude, mV |
+| `verdict` | string | Last step verdict: PASS, FAIL or -- |
+| `pass_count` | int | Steps passed so far |
+| `fail_count` | int | Steps failed so far |
+| `overall` | string | PASS, FAIL, RUNNING, FAULT or -- |
+| `leads_off` | int | 0 = leads connected, 1 = leads-off detected |
+| `cal_gain` | number | Calibration slope (measured = gain x reference + offset) |
+| `cal_offset` | number | Calibration intercept, BPM |
+| `cal_max_err` | number | Largest calibration error, BPM |
+| `uptime_s` | int | Tester uptime, seconds |
+| `steps` | array | Per-step objects: `n`, `gb` (gen BPM), `ga` (gen mV), `mb` (meas BPM), `ma` (meas mV), `v` (verdict) |
+| `cal` | array | Calibration points: `ref` (reference BPM), `meas` (measured BPM) |
+
+The DUT reports to the Tester over UART as one line per second, in the format
+`BPM=<int> AMP=<float> LO=<0 or 1>`, for example `BPM=59 AMP=0.98 LO=0`.
+
+## Safety and scope
+
+This bench runs at 3.3 to 5 V and never connects to a person. The ECG is generated electronically and
+injected into a chip, so there are no body electrodes in normal use, and the AD8232 electrode leads
+should not be attached to anyone while it is powered. It is a student research prototype, not a medical
+device, must not be used on patients or for any clinical decision, and is not a substitute for a
+certified analyzer such as those from Fluke Biomedical, Rigel, Datrend or BC Group. Standards such as
+IEC 60601-1 (medical electrical safety), IEC 60601-2-27 (ECG monitors) and AAMI/ANSI EC11/EC13 describe
+what a real product would meet; this prototype only demonstrates the concepts behind them and is not
+tested or certified to any of them.
+
