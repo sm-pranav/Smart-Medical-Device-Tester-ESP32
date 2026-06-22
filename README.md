@@ -1,4 +1,4 @@
-﻿# Smart Medical Device Tester and Calibration System
+# Smart Medical Device Tester and Calibration System
 
 An automated bench that tests and calibrates a patient-monitor ECG channel. It generates a known
 synthetic ECG, injects it into a device under test, reads back what the device measured, and marks
@@ -343,3 +343,39 @@ IEC 60601-1 (medical electrical safety), IEC 60601-2-27 (ECG monitors) and AAMI/
 what a real product would meet; this prototype only demonstrates the concepts behind them and is not
 tested or certified to any of them.
 
+## Troubleshooting
+
+| Problem | Likely cause and fix |
+|---|---|
+| Build error: `redefinition of 'const int PIN_TX2'` | Both `.ino` files are in the same folder, so Arduino compiled them as one program. Each sketch needs its own folder named after its `.ino`. |
+| Build error: `'function' does not name a type` | The dashboard page has been moved into the `.ino`. It must stay in `index_html.h`; the Arduino preprocessor misreads the page's JavaScript as C++. |
+| Build error: `Adafruit_SSD1306.h: No such file` | Libraries not installed. Library Manager, install `Adafruit SSD1306` and `Adafruit GFX Library`, and accept `Adafruit BusIO`. |
+| OLED stays blank | Check VCC on 3V3, SDA on 21, SCL on 22. Run the Tester in TEST_MODE and look for `found 0x3C`; if it shows `0x3D`, change `OLED_ADDR` in the sketch. |
+| DUT always reports BPM 0 | No signal reaching the AD8232. Check the attenuator chain and the 1 uF cap, confirm the AD8232 is powered, and that RA carries the injected signal. Watch the raw trace in the DUT's TEST_MODE. |
+| BPM jumpy or wildly wrong | Grounding or noise. Shorten the wire to RA, confirm the 100 ohm goes to ground, tie all grounds together, and nudge `THRESH_FRAC` up in the DUT if noise causes double-counting. |
+| Amplitude reads low at 2 mV | Expected. The AD8232's fixed ~1100 gain with a 3.3 V ADC clips above roughly 1.5 mV. Tune `AFE_GAIN` in the DUT so a known 1.0 mV reads near 1.00, and treat the top step as a dynamic-range check. |
+| UART garbage or FAULT on screen | TX/RX not crossed, baud mismatch, or grounds not tied. Tester GPIO17 to DUT GPIO16, Tester GPIO16 to DUT GPIO17, both at 115200, shared ground. |
+| MedTester Wi-Fi not visible | Wait about 10 seconds after boot and check the Serial Monitor shows the SoftAP line. Move closer to the board. |
+| Dashboard will not load | Use http not https, and stay connected to MedTester despite the phone's no-internet warning. |
+| ESP32 resets under load | Power dip. Use a good USB source or a power bank with an always-on mode. |
+
+## Limitations and next steps
+
+The honest scope, so the framing stays straight. The device under test is a monitor I built myself, not
+a certified commercial monitor, so this demonstrates the tester architecture rather than a real
+qualification. The signal chain is hobby grade: an 8-bit DAC, breadboard resistors and a general-purpose
+ADC, so it is repeatable and good for showing the method but not traceable, and it cannot state a
+measurement uncertainty the way a real calibration certificate does. The amplitude path is the weakest
+part, because the AD8232's fixed gain against a 3.3 V ADC clips above about 1.5 mV, which is exactly why
+the 2.0 mV step is included as an honest edge case rather than hidden. Heart-rate accuracy is the strong
+part, since it depends only on timing between peaks.
+
+Reasonable next steps would be an instrumentation-grade DAC and analog stage for a cleaner, wider
+amplitude range, an interface that reads a real monitor's data port so the DUT could be a genuine
+commercial monitor, multi-parameter simulation such as respiration or SpO2, a traceable reference so the
+calibration could report real uncertainty, and moving the waveform generation onto a hardware timer for
+jitter-free output.
+
+## Author
+
+Pranav S M
